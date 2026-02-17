@@ -14,17 +14,19 @@
   - [**Hide server signature**](#hide-server-signature)
   - [**Restrict access to files**](#restrict-access-to-files)
 - [**Nginx**](#nginx)
-- [**Database**](#database)
 - [**Authorization**](#authorization)
-- [**Cookies**](#cookies)
-- [**CSRF Token**](#csrf-token)
+- [**Database**](#database)
 - [**PHP**](#php)
   - [**PHP-FPM**](#php-fpm)
   - [**PHP PDO**](#php-pdo)
   - [**php.ini**](#phpini)
-- [**Express.js**](#expressjs)
-- [**User login**](#user-login)
 - [**Node.js/npm**](#nodejsnpm)
+- [**Express.js**](#expressjs)
+  - [**Server**](#server)
+  - [**Express session**](#express-session)
+- [**User login**](#user-login)
+- [**CSRF Token**](#csrf-token)
+- [**Cookies**](#cookies)
 - [**Docker**](#docker)
 - [**Ubuntu VPS**](#ubuntu-vps)
 - [**HTTP Headers**](#http-headers)
@@ -179,6 +181,15 @@ server {
 }
 ```
 
+## **Authorization**
+
+- Deny by default
+- Enforce least privileges
+- Validate all permissions
+- Validate files access
+- Sanitize files upload
+- Require user password for sensitive actions
+
 ## **Database**
 
 - Use a strong database password and restrict user permissions
@@ -212,61 +223,6 @@ try {
 - Avoid _$accumulator_, _$function_, _$where_ in MongoDB
 - Use .env for database and server secrets, encrypt it with _dotenvx_
 - Encrypt all user data (e.g. AES-256-GCM), store encryption keys in a secure vault like AWS Secrets Manager, Google Secrets Manager or Azure KeyVault
-
-## **Authorization**
-
-- Deny by default
-- Enforce least privileges
-- Validate all permissions
-- Validate files access
-- Sanitize files upload
-- Require user password for sensitive actions
-
-## **Cookies**
-
-``Domain=domain.com; Path=/; Secure; HttpOnly; SameSite=Lax or Strict``
-
-**Secure:** All cookies must be set with the _Secure_ directive, indicating that they should only be sent over HTTPS
-
-**HttpOnly:** Cookies that don't require access from JavaScript should have the _HttpOnly_ directive set to block access
-
-**Domain:** Cookies should only have a _Domain_ set if they need to be accessible on other domains; this should be set to the most restrictive domain possible
-
-**Path:** Cookies should be set to the most restrictive _Path_ possible
-
-**SameSite:**
-
-- **Strict (preferred):** Only send the cookie in same-site contexts. Cookies are omitted in cross-site requests and cross-site navigation
-- **Lax:** Send the cookie in same-site requests and when navigating to your website. Use this value if _Strict_ is too restrictive
-
-> [!IMPORTANT]
-> Since using SameSite with the **Strict** attribute is relatively safe, it is also recommended to use a CSRF token
-
-## **CSRF Token**
-
-```js
-// js/node
-const verifyCsrfToken = (req, res, next) => {
-  const userToken = req.headers['x-csrf-token']
-  const storedToken = req.cookies?.csrfToken
-
-  if (!userToken || !storedToken) {
-    return res.status(403).json({ error: 'Invalid CSRF token' })
-  }
-
-  try {
-    const userBuffer = Buffer.from(userToken, 'utf8')
-    const storedBuffer = Buffer.from(storedToken, 'utf8')
-
-    if (userBuffer.length !== storedBuffer.length || !crypto.timingSafeEqual(userBuffer, storedBuffer)) {
-      return res.status(403).json({ error: 'Invalid CSRF token' })
-    }
-  } catch {
-    return res.status(403).json({ error: 'Invalid CSRF token' })
-  }
-  next()
-}
-```
 
 ## **PHP**
 
@@ -319,19 +275,52 @@ session.cookie_samesite  = strict
 session.sid_length       = > 128
 ```
 
+## **Node.js/npm**
+
+- Always keep all npm dependencies up to date
+- Limit the use of dependencies
+- Use _npm doctor_ to ensure that your npm installation has what it needs to manage your JavaScript packages
+- Use eslint to write quality code
+- To manage user cookies, use express.js and passport.js with JWT tokens
+
 ## **Express.js**
 
-Secure Express.js with HTTPS:
+### **Server**
+
+Secure Express.js server with HTTPS:
 
 ```js
-https
-  .createServer({
-    key: fs.readFileSync(process.env.SSL_KEY),
-    cert: fs.readFileSync(process.env.SSL_CERT),
-  }, app)
-  .listen(PORT, () => {
-    console.log('Server listening on: https://localhost:%s', PORT)
+import express from 'express'
+import cors from 'cors'
+import helmet from 'helmet'
+import https from 'https'
+import fs from 'fs'
+
+const app = express()
+
+app.use(cors())
+app.set('trust proxy', 1)
+
+// use Helmet to secure headers and remove `x-powered-by`:
+app.use(helmet())
+app.disable('x-powered-by')
+
+const PORT = process.env.PORT || 3000
+
+if (process.env.NODE_ENV === 'production') {
+  https
+    .createServer({
+      key: fs.readFileSync(process.env.SSL_KEY),
+      cert: fs.readFileSync(process.env.SSL_CERT),
+    }, app)
+    .listen(PORT, () => {
+      console.log('Server listening on: https://localhost:%s', PORT)
+    })
+} else {
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`)
   })
+}
 ```
 
 Secure Express.js with Helmet and remove `x-powered-by`:
@@ -353,7 +342,9 @@ const limiter = rateLimit({
 app.use(limiter)
 ```
 
-Secure sessions with express-session:
+### **Express session**
+
+If you are using Express Session, secure it:
 
 ```js
 app.use(session({
@@ -369,6 +360,9 @@ app.use(session({
   }
 }))
 ```
+
+> [!NOTE]
+> I recommend using a stateless login with JSON Web Tokens instead of Express Session for greater scalability. See below.
 
 Verify authentication with JWT tokens:
 
@@ -388,7 +382,9 @@ const verifyJWTToken = async (req, res, next) => {
 
     let decoded
     try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET)
+      decoded = jwt.verify(token, process.env.JWT_SECRET, {
+        algorithms: ['HS256']
+      })
     } catch {
       return res.status(403).json({ response: 0 })
     }
@@ -396,7 +392,10 @@ const verifyJWTToken = async (req, res, next) => {
     const tokenActive = await redisClient.sIsMember(`user:tokens:${decoded.id}`, token)
     if (!tokenActive) return res.status(403).json({ response: 0 })
 
-    req.userId = decoded.id
+    req.user = {
+      id: decoded.id,
+      name: decoded.name
+    }
 
     next()
   } catch {
@@ -407,11 +406,12 @@ const verifyJWTToken = async (req, res, next) => {
 
 ## **User login**
 
-A secure express.js login system using JWT tokens, rate limiting and passport.js:
+A secure express.js login system using JWT token, rate limiting and passport.js:
 
 ```js
 /**
- * A secure login with JWT Token and CSRF Token using local passport.js
+ * A secure login with stateless JWT token and CSRF Token using local passport.js
+ * JWT token is stored in Redis.
  */
 import rateLimit from 'express-rate-limit'
 
@@ -433,49 +433,85 @@ app.post('/login', loginLimiter, async (req, res, next) => {
     if (!user) return res.status(401).send('Wrong username or password.')
 
     const token = jwt.sign(
-      { id: user.id },
+      {
+        id: user.id,
+        name: user.name
+      },
       process.env.JWT_SECRET,
-      { expiresIn: 604800 }
+      { expiresIn: 604800, algorithm: 'HS256' }
     )
 
     await redisClient.sAdd(`user:tokens:${user.id}`, token)
     await redisClient.expire(`user:tokens:${user.id}`, 604800)
 
-    req.session.regenerate((err) => {
-      if (err) return res.status(401).send('Internal server error')
-
-      req.session.userId = user.id
-
-      res.cookie('jwtToken', token, {
-        maxAge: 604800000,
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'Strict'
-      })
-
-      const csrfToken = crypto.randomBytes(32).toString('hex')
-      res.cookie('csrfToken', csrfToken, {
-        maxAge: 604800000,
-        httpOnly: false,
-        secure: true,
-        sameSite: 'Strict'
-      })
-
-      return res.status(200).send('Logged in!')
+    res.cookie('jwtToken', token, {
+      maxAge: 604800000,
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'Strict'
     })
+
+    const csrfToken = crypto.randomBytes(32).toString('hex')
+
+    res.cookie('csrfToken', csrfToken, {
+      maxAge: 604800000,
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'Strict'
+    })
+
+    return res.status(200).send('Logged in!')
   } catch {
     return res.status(401).send('Wrong username or password.')
   }
 })
 ```
 
-## **Node.js/npm**
+## **CSRF Token**
 
-- Always keep all npm dependencies up to date
-- Limit the use of dependencies
-- Use _npm doctor_ to ensure that your npm installation has what it needs to manage your JavaScript packages
-- Use eslint to write quality code
-- To manage user cookies, use express.js and passport.js with JWT tokens
+```js
+// js/node
+const verifyCsrfToken = (req, res, next) => {
+  const userToken = req.headers['x-csrf-token']
+  const storedToken = req.cookies?.csrfToken
+
+  if (!userToken || !storedToken) {
+    return res.status(403).json({ error: 'Invalid CSRF token' })
+  }
+
+  try {
+    const userBuffer = Buffer.from(userToken, 'utf8')
+    const storedBuffer = Buffer.from(storedToken, 'utf8')
+
+    if (userBuffer.length !== storedBuffer.length || !crypto.timingSafeEqual(userBuffer, storedBuffer)) {
+      return res.status(403).json({ error: 'Invalid CSRF token' })
+    }
+  } catch {
+    return res.status(403).json({ error: 'Invalid CSRF token' })
+  }
+  next()
+}
+```
+
+## **Cookies**
+
+``Domain=domain.com; Path=/; Secure; HttpOnly; SameSite=Lax or Strict``
+
+**Secure:** All cookies must be set with the _Secure_ directive, indicating that they should only be sent over HTTPS
+
+**HttpOnly:** Cookies that don't require access from JavaScript should have the _HttpOnly_ directive set to block access
+
+**Domain:** Cookies should only have a _Domain_ set if they need to be accessible on other domains; this should be set to the most restrictive domain possible
+
+**Path:** Cookies should be set to the most restrictive _Path_ possible
+
+**SameSite:**
+
+- **Strict (preferred):** Only send the cookie in same-site contexts. Cookies are omitted in cross-site requests and cross-site navigation
+- **Lax:** Send the cookie in same-site requests and when navigating to your website. Use this value if _Strict_ is too restrictive
+
+> [!IMPORTANT]
+> Since using SameSite with the **Strict** attribute is relatively safe, it is also recommended to use a CSRF token
 
 ## **Docker**
 
