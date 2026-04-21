@@ -28,6 +28,7 @@
 - [**User login**](#user-login)
 - [**CSRF Token**](#csrf-token)
 - [**Cookies**](#cookies)
+- [**File upload**](#file-upload)
 - [**Docker**](#docker)
 - [**Ubuntu VPS**](#ubuntu-vps)
 - [**HTML DOM sanitization**](#html-dom-sanitization)
@@ -305,7 +306,7 @@ session.sid_length       = > 128
 
 ### **Server**
 
-A secure Express.js server:
+[RECOMMENDED] Secure Express.js server (behind reverse proxy):
 
 ```js
 import express from 'express'
@@ -313,18 +314,60 @@ import helmet from 'helmet'
 
 const app = express()
 
-app.set('trust proxy', 1) // if using https nginx
-app.use(express.json({ limit: '50kb' })) // if using application/json for POST requests
+// If behind a reverse proxy like Nginx
+app.set('trust proxy', 1)
 
-// use Helmet to secure headers and remove `x-powered-by`:
+// If requests are application/json
+app.use(express.json({ limit: '50kb' }))
+
+// Security headers
 app.use(helmet())
 app.disable('x-powered-by')
 
 const PORT = process.env.PORT || 3000
 
-app.listen(PORT, () => {
+app.listen(
+  PORT,
+  '127.0.0.1', // bind only to localhost if possible
+  () => {
   console.log(`Server is running on port ${PORT}`)
 })
+```
+
+Or, secure Express.js server (WITHOUT reverse proxy):
+
+```js
+import express from 'express'
+import helmet from 'helmet'
+import https from 'https'
+import fs from 'fs'
+
+const app = express()
+
+app.use(express.json({ limit: '50kb' }))
+app.use(helmet())
+app.disable('x-powered-by')
+
+const PORT = process.env.PORT || 3000
+
+https.createServer({
+  key: fs.readFileSync(process.env.SSL_KEY),
+  cert: fs.readFileSync(process.env.SSL_CERT),
+}, app).listen(PORT, () => {
+  console.log(`HTTPS server running on port ${PORT}`)
+})
+```
+
+If you want CORS requests:
+
+```js
+import cors from 'cors'
+
+const corsOptions = {
+  origin: process.env.YOUR_URL,
+  credentials: true,
+}
+app.use(cors(corsOptions))
 ```
 
 Secure Express.js with Helmet and remove `x-powered-by`:
@@ -476,8 +519,9 @@ app.post('/login', loginLimiter, async (req, res, next) => {
 ## **CSRF Token**
 
 SameSite cookie is good as defense in depth, but doesn’t prevent all possible CSRF attacks.
-Here is a secure CSRF token verification:
+Here is a secure CSRF token verification.
 
+Server side:
 ```js
 // js/node
 const verifyCsrfToken = (req, res, next) => {
@@ -502,6 +546,18 @@ const verifyCsrfToken = (req, res, next) => {
 }
 ```
 
+Client side:
+```js
+const res = await fetch('api/test/', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-CSRF-Token': YOUR_CSRF_TOKEN
+  },
+  body: data
+})
+```
+
 ## **Cookies**
 
 ``Domain=domain.com; Path=/; Secure; HttpOnly; SameSite=Lax or Strict``
@@ -521,6 +577,25 @@ const verifyCsrfToken = (req, res, next) => {
 
 > [!IMPORTANT]
 > Since using SameSite with the **Strict** attribute is relatively safe, it is also recommended to use a CSRF token
+
+## **File upload**
+
+Always check the file type and size before saving it:
+
+```js
+import multer from 'multer'
+
+const upload = multer({
+  dest: 'uploads/',
+  limits: { fileSize: 512000 },
+  fileFilter: (req, file, callback) => {
+    if (!file.originalname.match(/\.(csv|xlxs)$/)) {
+      return callback(new Error('Only csv and xlsx files are allowed!'), false)
+    }
+    callback(null, true)
+  }
+})
+```
 
 ## **Docker**
 
@@ -565,7 +640,8 @@ Disallow: /admin <- don’t do this
 ## **HTML DOM sanitization**
 
 ### **Zod**
-Zod is a great tool to sanitize inputs
+Zod is a great tool to sanitize inputs:
+
 ```js
 import * as z from 'zod'
 
