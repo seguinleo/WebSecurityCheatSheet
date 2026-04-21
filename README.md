@@ -7,13 +7,14 @@
   - [**Redirect all HTTP traffic to HTTPS**](#redirect-all-http-traffic-to-https)
   - [**Transport Layer Security (TLS)**](#transport-layer-security-tls)
   - [**HTTP Strict Transport Security (HSTS)**](#http-strict-transport-security-hsts)
-  - [**SSL**](#ssl)
 - [**Apache2**](#apache2)
   - [**Enable HTTP2**](#enable-http2)
   - [**Enable mod\_security**](#enable-mod_security)
+  - [**Enable Gzip**](#enable-gzip-or-brotli)
   - [**Hide server signature**](#hide-server-signature)
   - [**Restrict access to files**](#restrict-access-to-files)
-- [**Nginx**](#nginx)
+- [**Nginx**](#nginx-recommended)
+- [**HTTP Headers**](#http-headers)
 - [**Authorization**](#authorization)
 - [**Database**](#database)
 - [**PHP**](#php)
@@ -29,8 +30,8 @@
 - [**Cookies**](#cookies)
 - [**Docker**](#docker)
 - [**Ubuntu VPS**](#ubuntu-vps)
-- [**HTTP Headers**](#http-headers)
 - [**HTML DOM sanitization**](#html-dom-sanitization)
+  - [**Zod**](#zod)
   - [**Links**](#links)
   - [**POST vs GET**](#post-vs-get)
   - [**e.innerHTML**](#einnerhtml)
@@ -91,23 +92,6 @@ Header set strict-transport-security "max-age=31536000; includesubdomains; prelo
 
 Reload Apache and submit your website to <https://hstspreload.org/>
 
-### **SSL**
-
-Disable all non-secure encryption algorithms. Go to _/etc/apache2/conf-available/ssl.conf_ and write:
-
-```apache
-SSLCipherSuite ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384
-```
-
-Online Certificate Status Protocol stapling is a crucial technology that enhances both the speed and privacy of SSL/TLS connections. Go to _/etc/apache2/conf-available/ssl.conf_ and write:
-
-```apache
-SSLUseStapling on
-SSLStaplingResponderTimeout 5
-SSLStaplingReturnResponderErrors off
-SSLStaplingCache "shmcb:ssl_stapling(32768)" <- before VirtualHost
-```
-
 ## **Apache2**
 
 ### **Enable HTTP2**
@@ -125,6 +109,10 @@ Mod security is a free Web Application Firewall (WAF) that works with Apache2 or
 ```apache
 SecRuleEngine On <- /etc/modsecurity/modsecurity.conf
 ```
+
+### **Enable Gzip (or Brotli)**
+
+``a2enmod deflate``
 
 ### **Hide server signature**
 
@@ -152,18 +140,36 @@ Write in _/etc/apache2/apache2.conf_:
 </Directory>
 ```
 
-## **Nginx**
+## **Nginx (recommended)**
+
+A nginx template following the same Apache2 config above:
 
 ```nginx
 server {
   listen 80;
-  server_name localhost;
+  server_name your-website.com www.your-website.com;
+
+  return 301 https://$host$request_uri;
+}
+
+server {
+  listen 443 ssl http2;
+  server_name your-website.com www.your-website.com;
+
+  ssl_certificate /etc/ssl/cert.pem;
+  ssl_certificate_key /etc/ssl/key.pem;
+
+  ssl_protocols TLSv1.2 TLSv1.3;
+
+  root /usr/share/nginx/html;
+  index index.html;
+
   server_tokens off;
-  proxy_hide_header X-Powered-By;
+
+  gzip on;
+  gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
 
   location / {
-    root /usr/share/nginx/html;
-    index index.html;
     try_files $uri $uri/ /index.html;
 
     limit_except GET POST {
@@ -171,15 +177,27 @@ server {
     }
   }
 }
-server {
-  listen 443 ssl http2;
-
-  ssl_stapling on;
-  ssl_protocols TLSv1.2 TLSv1.3;
-  ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384';
-  ssl_prefer_server_ciphers on;
-}
 ```
+
+## **HTTP Headers**
+
+Recommended headers for Apache2 and nginx:
+
+```apache
+x-content-type-options: "nosniff"
+access-control-allow-origin "https://domain.com"
+referrer-policy "no-referrer"
+content-security-policy "upgrade-insecure-requests; default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src ‘self’; media-src 'self'; object-src ‘none’ ; script-src 'self'; script-src-attr 'none'; style-src 'self'"
+permissions-policy "geolocation=(), …"
+cross-origin-embedder-policy: "require-corp"
+cross-origin-opener-policy "same-origin"
+cross-origin-resource-policy "cross-origin"
+```
+
+In addition be sure to remove _Server_ and _X-Powered-By_ headers.
+
+> [!NOTE]
+> Never use _X-XSS-Protection_, it is depracated and can create XSS vulnerabilities in otherwise safe websites. _X-Frame-Options_ is replaced by _frame-ancestors 'none'_. Avoid as much as possible _unsafe-inline_ and _unsafe-eval_. Use hashes or nonces for inline scripts/styles.
 
 ## **Authorization**
 
@@ -287,19 +305,16 @@ session.sid_length       = > 128
 
 ### **Server**
 
-Secure Express.js server with HTTPS:
+A secure Express.js server:
 
 ```js
 import express from 'express'
-import cors from 'cors'
 import helmet from 'helmet'
-import https from 'https'
-import fs from 'fs'
 
 const app = express()
 
-app.use(cors())
-app.set('trust proxy', 1)
+app.set('trust proxy', 1) // if using https nginx
+app.use(express.json({ limit: '50kb' })) // if using application/json for POST requests
 
 // use Helmet to secure headers and remove `x-powered-by`:
 app.use(helmet())
@@ -307,20 +322,9 @@ app.disable('x-powered-by')
 
 const PORT = process.env.PORT || 3000
 
-if (process.env.NODE_ENV === 'production') {
-  https
-    .createServer({
-      key: fs.readFileSync(process.env.SSL_KEY),
-      cert: fs.readFileSync(process.env.SSL_CERT),
-    }, app)
-    .listen(PORT, () => {
-      console.log('Server listening on: https://localhost:%s', PORT)
-    })
-} else {
-  app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`)
-  })
-}
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`)
+})
 ```
 
 Secure Express.js with Helmet and remove `x-powered-by`:
@@ -333,13 +337,15 @@ app.disable('x-powered-by')
 Secure all routes with express-rate-limit:
 
 ```js
+const router = express.Router()
+
 const limiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 100,
   message: 'Too many requests, please try again later.',
 })
 
-app.use(limiter)
+router.use(limiter)
 ```
 
 ### **Express session**
@@ -469,6 +475,9 @@ app.post('/login', loginLimiter, async (req, res, next) => {
 
 ## **CSRF Token**
 
+SameSite cookie is good as defense in depth, but doesn’t prevent all possible CSRF attacks.
+Here is a secure CSRF token verification:
+
 ```js
 // js/node
 const verifyCsrfToken = (req, res, next) => {
@@ -553,27 +562,17 @@ User-agent: \*
 Disallow: /admin <- don’t do this
 ```
 
-## **HTTP Headers**
-
-A hardened template for Apache2 and nginx:
-
-```apache
-x-content-type-options: "nosniff"
-access-control-allow-origin "https://domain.com"
-referrer-policy "no-referrer"
-content-security-policy "upgrade-insecure-requests; default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src ‘self’; media-src 'self'; object-src ‘none’ ; script-src 'self'; script-src-attr 'none'; style-src 'self'"
-permissions-policy "geolocation=(), …"
-cross-origin-embedder-policy: "require-corp"
-cross-origin-opener-policy "same-origin"
-cross-origin-resource-policy "cross-origin"
-```
-
-In addition be sure to remove _Server_ and _X-Powered-By_ headers.
-
-> [!NOTE]
-> Never use _X-XSS-Protection_, it is depracated and can create XSS vulnerabilities in otherwise safe websites. _X-Frame-Options_ is depracated and replaced by _frame-ancestors 'none'_. Always start with _default-src 'none'_, avoid _unsafe-inline_ and _unsafe-eval_. Use hashes or nonces for inline scripts/styles.
-
 ## **HTML DOM sanitization**
+
+### **Zod**
+Zod is a great tool to sanitize inputs
+```js
+import * as z from 'zod'
+
+const User = z.object({
+  name: z.string().min(3).max(64),
+})
+```
 
 ### **Links**
 
