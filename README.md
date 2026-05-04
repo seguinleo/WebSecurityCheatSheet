@@ -22,9 +22,10 @@
   - [**PHP PDO**](#php-pdo)
   - [**php.ini**](#phpini)
 - [**Node.js/npm**](#nodejsnpm)
-- [**Express.js**](#expressjs)
+- [**Express**](#express)
   - [**Server**](#server)
   - [**Express session**](#express-session)
+- [**User registration**](#user-registration)
 - [**User login**](#user-login)
 - [**CSRF Token**](#csrf-token)
 - [**Cookies**](#cookies)
@@ -92,6 +93,9 @@ Header set strict-transport-security "max-age=31536000; includesubdomains; prelo
 ```
 
 Reload Apache and submit your website to <https://hstspreload.org/>
+
+> [!IMPORTANT]
+> Only enable preload if you're 100% HTTPS everywhere (including subdomains)
 
 ## **Apache2**
 
@@ -241,7 +245,7 @@ try {
 - For NoSQL databases, like MongoDB, use a typed model to prevent injections
 - Avoid _$accumulator_, _$function_, _$where_ in MongoDB
 - Use .env for database and server secrets, encrypt it with _dotenvx_
-- Encrypt all user data (e.g. AES-256-GCM), store encryption keys in a secure vault like AWS Secrets Manager, Google Secrets Manager or Azure KeyVault
+- Store keys in a secure vault like AWS Secrets Manager, Azure KeyVault or Hashicorp
 
 ## **PHP**
 
@@ -296,17 +300,16 @@ session.sid_length       = > 128
 
 ## **Node.js/npm**
 
-- Always keep all npm dependencies up to date
+- Always keep all npm dependencies up to date, use _npm audit_
 - Limit the use of dependencies
 - Use _npm doctor_ to ensure that your npm installation has what it needs to manage your JavaScript packages
 - Use eslint to write quality code
-- To manage user cookies, use express.js and passport.js with JWT tokens
 
-## **Express.js**
+## **Express**
 
 ### **Server**
 
-[RECOMMENDED] Secure Express.js server (behind reverse proxy):
+[RECOMMENDED] Secure Express server (behind reverse proxy):
 
 ```js
 import express from 'express'
@@ -334,7 +337,7 @@ app.listen(
 })
 ```
 
-Or, secure Express.js server (WITHOUT reverse proxy):
+Or, secure Express server with HTTPS (WITHOUT reverse proxy):
 
 ```js
 import express from 'express'
@@ -370,14 +373,7 @@ const corsOptions = {
 app.use(cors(corsOptions))
 ```
 
-Secure Express.js with Helmet and remove `x-powered-by`:
-
-```js
-app.use(helmet())
-app.disable('x-powered-by')
-```
-
-Secure all routes with express-rate-limit:
+Secure all routes with _express-rate-limit_:
 
 ```js
 const router = express.Router()
@@ -393,75 +389,93 @@ router.use(limiter)
 
 ### **Express session**
 
-If you are using Express Session, secure it:
+If you are using _express-session_, secure it and store in _Redis_:
 
 ```js
-app.use(session({
-  store: redisStore,
-  secret: process.env.SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    maxAge: 604800000,
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'Strict'
-  }
-}))
+import express from 'express'
+import session from 'express-session'
+import { RedisStore } from 'connect-redis'
+import { createClient } from 'redis'
+
+const app = express()
+
+const PORT = process.env.PORT || 3000
+
+const redisClient = createClient({
+  url: process.env.REDIS_URL,
+})
+
+try {
+  await redisClient.connect()
+  console.log('Redis client connected')
+} catch (err) {
+  console.error(err)
+  process.exit(1)
+}
+
+const redisStore = new RedisStore({
+  client: redisClient,
+  prefix: 'your_app:',
+  ttl: 3600,
+})
+
+app.use(
+  session({
+    store: redisStore,
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Strict',
+    },
+  })
+)
 ```
 
-> [!NOTE]
-> I recommend using a stateless login with JSON Web Tokens instead of Express Session for greater scalability. See below.
+## **User registration**
 
-Verify authentication with JWT tokens:
+A secure Express user registration using _bcrypt_ and _zod_:
 
 ```js
-/**
-  * This code is a middleware function designed to authenticate users in a web application using a JWT (JSON Web Token).
-  * It first checks if the user ID and JWT token exist in the request and are properly formatted. Then, it verifies whether the token has been revoked by checking a blacklist stored in Redis (ie logout). After that, it decodes and validates the token’s signature to ensure it is genuine and belongs to the logged-in user.
-  * If everything checks out, the request is allowed to proceed. If any step fails, the function returns an unauthorized error.
-  */
-const verifyJWTToken = async (req, res, next) => {
-  const token = req.cookies?.jwtToken
-  if (!token) return res.status(403).json({ response: 0 })
+const createAccountSchema = z.object({
+  nameCreate: z
+    .string()
+    .min(3)
+    .max(30)
+    .regex(/^[\p{L} -]+$/u),
+  psswdCreate: z.string().min(10).max(64)
+})
+
+router.post('/create-account', async (req, res) => {
+  const parsed = createAccountSchema.safeParse(req.body)
+  if (!parsed.success) {
+    return res.status(400).send('Account creation failed')
+  }
+
+  const { nameCreate, psswdCreate } = parsed.data
+
+  const id = crypto.randomBytes(12).toString('hex')
+  const psswdCreateHash = await bcrypt.hash(psswdCreate, 12)
 
   try {
-    const isBlacklisted = await redisClient.get(`blacklist:${token}`)
-    if (isBlacklisted) return res.status(403).json({ response: 0 })
-
-    let decoded
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET, {
-        algorithms: ['HS256']
-      })
-    } catch {
-      return res.status(403).json({ response: 0 })
-    }
-
-    const tokenActive = await redisClient.sIsMember(`user:tokens:${decoded.id}`, token)
-    if (!tokenActive) return res.status(403).json({ response: 0 })
-
-    req.user = {
-      id: decoded.id,
-      name: decoded.name
-    }
-
-    next()
+    await pool.execute(
+      "INSERT INTO users (id, name, psswd) VALUES (?, ?, ?)",
+      [id, nameCreate, psswdCreateHash]
+    )
+    return res.status(200).send('Account created successfully')
   } catch {
-    return res.status(403).json({ response: 0 })
+    return res.status(400).send('Account creation failed')
   }
-}
+})
 ```
 
 ## **User login**
 
-A secure express.js login system using JWT token, rate limiting and passport.js:
+A secure Express login system using rate limiting and _passport.js_:
 
 ```js
-/**
- * A secure login with stateless JWT token and CSRF Token using local passport.js
- * JWT token is stored in Redis.
- */
 import rateLimit from 'express-rate-limit'
 
 const loginLimiter = rateLimit({
@@ -481,32 +495,10 @@ app.post('/login', loginLimiter, async (req, res, next) => {
 
     if (!user) return res.status(401).send('Wrong username or password.')
 
-    const token = jwt.sign(
-      {
-        id: user.id,
-        name: user.name
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: 604800, algorithm: 'HS256' }
-    )
+    req.session.regenerate((err) => {
+      if (err) return res.status(401).send('Wrong username or password.')
 
-    await redisClient.sAdd(`user:tokens:${user.id}`, token)
-    await redisClient.expire(`user:tokens:${user.id}`, 604800)
-
-    res.cookie('jwtToken', token, {
-      maxAge: 604800000,
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'Strict'
-    })
-
-    const csrfToken = crypto.randomBytes(32).toString('hex')
-
-    res.cookie('csrfToken', csrfToken, {
-      maxAge: 604800000,
-      httpOnly: false,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'Strict'
+      // create session here
     })
 
     return res.status(200).send('Logged in!')
@@ -518,45 +510,9 @@ app.post('/login', loginLimiter, async (req, res, next) => {
 
 ## **CSRF Token**
 
-SameSite cookie is good as defense in depth, but doesn’t prevent all possible CSRF attacks.
-Here is a secure CSRF token verification.
+SameSite cookie is good as defense in depth, but doesn’t prevent all possible CSRF attacks. Use CSRF Token or Double Submit Cookie. [Read OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html)
 
-Server side:
-```js
-// js/node
-const verifyCsrfToken = (req, res, next) => {
-  const userToken = req.headers['x-csrf-token']
-  const storedToken = req.cookies?.csrfToken
-
-  if (!userToken || !storedToken) {
-    return res.status(403).json({ error: 'Invalid CSRF token' })
-  }
-
-  try {
-    const userBuffer = Buffer.from(userToken, 'utf8')
-    const storedBuffer = Buffer.from(storedToken, 'utf8')
-
-    if (userBuffer.length !== storedBuffer.length || !crypto.timingSafeEqual(userBuffer, storedBuffer)) {
-      return res.status(403).json({ error: 'Invalid CSRF token' })
-    }
-  } catch {
-    return res.status(403).json({ error: 'Invalid CSRF token' })
-  }
-  next()
-}
-```
-
-Client side:
-```js
-const res = await fetch('api/test/', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'X-CSRF-Token': YOUR_CSRF_TOKEN
-  },
-  body: data
-})
-```
+I recommend [csrf-csrf](https://github.com/Psifi-Solutions/csrf-csrf) for Express.
 
 ## **Cookies**
 
@@ -576,23 +532,53 @@ const res = await fetch('api/test/', {
 - **Lax:** Send the cookie in same-site requests and when navigating to your website. Use this value if _Strict_ is too restrictive
 
 > [!IMPORTANT]
-> Since using SameSite with the **Strict** attribute is relatively safe, it is also recommended to use a CSRF token
+> Since using SameSite with the **Strict** attribute is relatively safe, it is also recommended to use a CSRF token for sensible apps
 
 ## **File upload**
 
-Always check the file type and size before saving it:
+Always the extension AND the actual MIME type AND size before saving it:
 
 ```js
 import multer from 'multer'
+import crypto from 'crypto'
+import path from 'path'
+import fs from 'fs'
+
+const uploadDir = '/var/uploads'
+
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true })
+}
+
+const ALLOWED_MIME_TYPES = [
+  'text/csv',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+]
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir)
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname)
+    const safeName = crypto.randomBytes(16).toString('hex')
+    cb(null, safeName + ext)
+  }
+})
 
 const upload = multer({
-  dest: 'uploads/',
+  storage,
   limits: { fileSize: 512000 },
-  fileFilter: (req, file, callback) => {
-    if (!file.originalname.match(/\.(csv|xlxs)$/)) {
-      return callback(new Error('Only csv and xlsx files are allowed!'), false)
+  fileFilter: (req, file, cb) => {
+    if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+      return cb(new Error('Invalid file type'), false)
     }
-    callback(null, true)
+
+    if (!file.originalname.match(/\.(csv|xlsx)$/i)) {
+      return cb(new Error('Invalid file extension'), false)
+    }
+
+    cb(null, true)
   }
 })
 ```
@@ -618,7 +604,7 @@ USER myuser
 - Create a user with restricted permissions and 2FA or physical key
 - Always update all packages and limit their number
 - Disable unused network ports
-- Change SSH port and use Fail2Ban to prevent DoS and Bruteforce attacks, disable SSH root login in _sshd_config_
+- Use Fail2Ban to prevent DoS and Bruteforce attacks, disable SSH root login in _sshd_config_
 
 ```ini
 PasswordAuthentication no
@@ -631,11 +617,6 @@ PermitRootLogin no
 - Use SFTP instead of FTP
 - Use a firewall like iptables or ufw
 - Use _robots.txt_ to disallow all by default and don't disclose sensitive URLs
-
-```ini
-User-agent: \*
-Disallow: /admin <- don’t do this
-```
 
 ## **HTML DOM sanitization**
 
@@ -656,7 +637,7 @@ Always use _rel="noreferrer noopener"_ to prevent the referrer header from being
 
 ### **POST vs GET**
 
-Never trust user inputs, validate and sanitize all data. Prefer POST requests instead of GET requests and sanitize/encode user form data with a strong regex and _application/json_.
+Never trust user inputs, validate and sanitize all data. Use GET for idempotent requests, POST for state changes. Sanitize and valid data with a strong regex and use _application/json_ instaed of _application/x-www-form-urlencoded_:
 
 ```js
 try {
@@ -683,7 +664,7 @@ try {
 
 ### **e.innerHTML**
 
-Never use _innerHTML_; use _innerText_ or _textContent_ instead. You can also create your element with _document.createElement()_.
+Never use _innerHTML_ without DOMPurify; use _innerText_ or _textContent_ instead. You can also create your element with _document.createElement()_.
 
 ### **eval() and new Function()**
 
@@ -699,9 +680,7 @@ import DOMPurify from 'dompurify'
 const PURIFY_CONFIG = {
   SANITIZE_NAMED_PROPS: true,
   ALLOW_DATA_ATTR: false,
-  ALLOWED_URI_REGEXP: /^(https?|mailto|tel):/i,
-  FORBID_TAGS: ['dialog', 'footer', 'form', 'header', 'iframe', 'main', 'nav', 'script', 'style'],
-  FORBID_ATTR: ['style', 'class', 'onclick', 'onload', 'onerror']
+  ALLOWED_URI_REGEXP: /^(https?|mailto|tel):/i
 }
 
 const clean = DOMPurify.sanitize(dirty, PURIFY_CONFIG)
