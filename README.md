@@ -42,7 +42,7 @@
 - [**Analysis tools**](#analysis-tools)
 - [**Sources and resources**](#sources-and-resources)
 
-**_This document is a concise guide that aims to list the main web vulnerabilities, particularly JavaScript, and some solutions. However, it is exhaustive and should be supplemented with quality, up-to-date documentation._**
+**_This document is a concise guide that aims to list the main web vulnerabilities, particularly JavaScript, and some solutions. This guide should be supplemented with quality, up-to-date documentation._**
 
 **_This guide is intended for full-stack developers working with JavaScript technologies (React, Vue, etc.) and a Node.js/PHP backend with CRUD/REST APIs._**
 
@@ -81,7 +81,7 @@ Redirect permanent / <https://domain.com/>
 General purpose web applications should default to TLS 1.3 (support TLS 1.2 if necessary) with all other protocols disabled. Only enable TLS 1.2 and 1.3. Go to _/etc/apache2/conf-available/ssl.conf_ and write:
 
 ```apache
-SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1
+SSLProtocol TLSv1.2 TLSv1.3
 ```
 
 ### **HTTP Strict Transport Security (HSTS)**
@@ -192,7 +192,7 @@ Recommended headers for Apache2 and nginx:
 x-content-type-options: "nosniff"
 access-control-allow-origin "https://domain.com"
 referrer-policy "no-referrer"
-content-security-policy "upgrade-insecure-requests; default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src ‘self’; media-src 'self'; object-src ‘none’ ; script-src 'self'; script-src-attr 'none'; style-src 'self'"
+content-security-policy "upgrade-insecure-requests; default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self'; media-src 'self'; object-src 'none' ; script-src 'self'; script-src-attr 'none'; style-src 'self'"
 permissions-policy "geolocation=(), …"
 cross-origin-embedder-policy: "require-corp"
 cross-origin-opener-policy "same-origin"
@@ -242,9 +242,8 @@ try {
 ```
 
 - For MySQL/MariaDB databases, use _mysql_secure_installation_
-- For NoSQL databases, like MongoDB, use a typed model to prevent injections
+- For NoSQL databases, like MongoDB, use a typed model to prevent some injections
 - Avoid _$accumulator_, _$function_, _$where_ in MongoDB
-- Use .env for database and server secrets, encrypt it with _dotenvx_
 - Store keys in a secure vault like AWS Secrets Manager, Azure KeyVault or Hashicorp
 
 ## **PHP**
@@ -508,9 +507,11 @@ app.post('/login', loginLimiter, async (req, res, next) => {
 })
 ```
 
+**Use MFA (2FA) for sensible apps !**
+
 ## **CSRF Token**
 
-SameSite cookie is good as defense in depth, but doesn’t prevent all possible CSRF attacks. Use CSRF Token or Double Submit Cookie. [Read OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html)
+SameSite cookie is good as defense in depth, but doesn't prevent all possible CSRF attacks. Use CSRF Token or Double Submit Cookie. [Read OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html)
 
 I recommend [csrf-csrf](https://github.com/Psifi-Solutions/csrf-csrf) for Express.
 
@@ -540,47 +541,64 @@ Always the extension AND the actual MIME type AND size before saving it:
 
 ```js
 import multer from 'multer'
-import crypto from 'crypto'
 import path from 'path'
 import fs from 'fs'
+import { fileTypeFromBuffer } from 'file-type'
 
 const uploadDir = '/var/uploads'
 
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true })
 }
-
-const ALLOWED_MIME_TYPES = [
-  'text/csv',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+const ALLOWED_TYPES = [
+  {
+    mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ext: 'xlsx'
+  }
 ]
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir)
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname)
-    const safeName = crypto.randomBytes(16).toString('hex')
-    cb(null, safeName + ext)
-  }
-})
+const storage = multer.memoryStorage()
 
-const upload = multer({
+export const upload = multer({
   storage,
-  limits: { fileSize: 512000 },
-  fileFilter: (req, file, cb) => {
-    if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-      return cb(new Error('Invalid file type'), false)
-    }
-
-    if (!file.originalname.match(/\.(csv|xlsx)$/i)) {
-      return cb(new Error('Invalid file extension'), false)
-    }
-
-    cb(null, true)
-  }
+  limits: { fileSize: 512000 }
 })
+
+export const handleUpload = async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' })
+    }
+
+    const buffer = req.file.buffer
+
+    const fileType = await fileTypeFromBuffer(buffer)
+
+    if (!fileType) {
+      return res.status(400).json({ error: 'Unknown file type' })
+    }
+
+    const allowed = ALLOWED_TYPES.find(
+      t => t.mime === fileType.mime && t.ext === fileType.ext
+    )
+
+    if (!allowed) {
+      return res.status(400).json({ error: 'Invalid file type' })
+    }
+
+    const originalName = req.file.originalname
+    const baseName = path.parse(originalName).name
+    const safeName = baseName.replace(/[^a-z0-9_\-]/gi, '_')
+    const finalName = `${safeName}.${fileType.ext}`
+    const finalPath = path.join(uploadDir, finalName)
+
+    await fs.promises.writeFile(finalPath, buffer)
+
+    next()
+  } catch (err) {
+    next(err)
+  }
+}
 ```
 
 ## **Docker**
