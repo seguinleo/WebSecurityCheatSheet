@@ -435,7 +435,7 @@ app.use(
 
 ## **User registration**
 
-A secure Express user registration using _bcrypt_ and _zod_:
+A secure Express user registration using _Argon2id_ and _zod_:
 
 ```js
 const createAccountSchema = z.object({
@@ -456,7 +456,7 @@ router.post('/create-account', async (req, res) => {
   const { nameCreate, psswdCreate } = parsed.data
 
   const id = crypto.randomBytes(12).toString('hex')
-  const psswdCreateHash = await bcrypt.hash(psswdCreate, 12)
+  const psswdCreateHash = await argon2.hash(psswdCreate)
 
   try {
     await pool.execute(
