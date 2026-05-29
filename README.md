@@ -76,6 +76,14 @@ Write in _/etc/apache2/apache2.conf_:
 Redirect permanent / <https://domain.com/>
 ```
 
+### **Redirect www to non-www**
+
+```apache
+RewriteCond %{HTTPS} off [OR]
+RewriteCond %{HTTP_HOST} ^www\.(.*)$ [NC]
+RewriteRule ^ https://example.com%{REQUEST_URI} [L,R=301]
+```
+
 ### **Transport Layer Security (TLS)**
 
 General purpose web applications should default to TLS 1.3 (support TLS 1.2 if necessary) with all other protocols disabled. Only enable TLS 1.2 and 1.3. Go to _/etc/apache2/conf-available/ssl.conf_ and write:
@@ -155,6 +163,17 @@ server {
   server_name your-website.com www.your-website.com;
 
   return 301 https://$host$request_uri;
+}
+
+# Redirect www to non www
+server {
+  listen 443 ssl http2;
+  server_name www.your-website.com;
+
+  ssl_certificate /etc/ssl/cert.pem;
+  ssl_certificate_key /etc/ssl/key.pem;
+
+  return 301 https://your-website.com$request_uri;
 }
 
 server {
